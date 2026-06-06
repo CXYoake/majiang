@@ -132,6 +132,16 @@ button:disabled {
   opacity: 0.45;
 }
 
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+.peng-button:not([hidden]):not(:disabled),
+.gang-button:not([hidden]):not(:disabled) {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
 .table-shell {
   min-height: 640px;
   position: relative;

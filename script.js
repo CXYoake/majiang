@@ -324,7 +324,7 @@ function findPengOption(discardedTile, discarderId) {
     const player = state.players[playerId];
     if (!player) continue;
     const tiles = matchingTiles(player, key);
-    if (tiles.length === 2) {
+    if (tiles.length >= 2) {
       return {
         type: "peng",
         playerId,
@@ -332,7 +332,7 @@ function findPengOption(discardedTile, discarderId) {
         tile: discardedTile,
         tileKey: key,
         label: tileName(discardedTile),
-        tileIds: tiles.map((tile) => tile.id)
+        tileIds: tiles.slice(0, 2).map((tile) => tile.id)
       };
     }
   }
@@ -349,6 +349,23 @@ function getHumanGangOptions() {
   return [];
 }
 
+function shouldAiPeng(option) {
+  const player = state.players[option.playerId];
+  if (!player) return false;
+
+  const newMeldCount = (player.melds?.length || 0) + 1;
+  const newHandLength = 14 - newMeldCount * 3;
+  if (player.hand.length - 2 === newHandLength) return true;
+  if (player.hand.length - 2 >= newHandLength + 1 && state.wall.length > 15) return true;
+  if (state.wall.length < 10) return false;
+
+  const otherTiles = player.hand.filter((t) => tileKey(t) !== option.tileKey);
+  const singles = otherTiles.filter((t) =>
+    otherTiles.filter((x) => tileKey(x) === tileKey(t)).length === 1
+  ).length;
+  return singles <= 5;
+}
+
 function executePeng(option) {
   if (!option) return false;
   const player = state.players[option.playerId];
@@ -358,7 +375,6 @@ function executePeng(option) {
   state.pendingPeng = null;
   state.pendingGang = null;
   state.gangChoicesOpen = false;
-
   const discardIndex = discarder.discards.findIndex((tile) => tile.id === option.tile.id);
   if (discardIndex === -1) return false;
   const tiles = matchingTiles(player, option.tileKey).slice(0, 2);
@@ -509,11 +525,14 @@ function renderMelds(player) {
   if (!player.melds?.length) return "";
   return `
     <div class="meld-row" aria-label="${player.name} 已亮牌">
-      ${player.melds.map((meld) => `
+      ${player.melds.map((meld) => {
+        const source = meld.fromPlayerId != null ? state.players[meld.fromPlayerId]?.name : "";
+        const sourceLabel = source ? ` ← ${source}` : "";
+        return `
         <span class="meld-chip ${meld.type === "concealed" ? "is-concealed" : "is-exposed"}">
-          ${gangTypeLabel(meld.type)} ${tileName(meld.tiles[0])}
-        </span>
-      `).join("")}
+          ${gangTypeLabel(meld.type)} ${tileName(meld.tiles[0])}${sourceLabel}
+        </span>`;
+      }).join("")}
     </div>
   `;
 }
@@ -564,9 +583,11 @@ function renderActions() {
   }
 
   const isHumanTurn = state.currentPlayer === 0 && state.phase === "player-turn";
-  const humanGangOptions = getHumanGangOptions();
   const isPendingHumanPeng = state.pendingPeng?.playerId === 0;
   const isPendingHumanGang = state.pendingGang?.playerId === 0;
+  const humanGangOptions = isPendingHumanGang
+    ? [state.pendingGang]
+    : (isHumanTurn ? [...getConcealedGangOptions(0), ...getAddedGangOptions(0)] : []);
   const canDiscard = isHumanTurn && !isPendingHumanPeng && !isPendingHumanGang && Boolean(state.selectedTileId);
   els.discardButton.disabled = !canDiscard;
   els.pengButton.hidden = !isPendingHumanPeng;
@@ -580,12 +601,19 @@ function renderActions() {
   if (state.phase === "ended") {
     els.statusTitle.textContent = "本局结束";
     els.statusText.textContent = "点击“新开一局”继续。";
+  } else if (isPendingHumanPeng && isPendingHumanGang) {
+    const gangSource = state.players[state.pendingGang.fromPlayerId]?.name || "";
+    const pengSource = state.players[state.pendingPeng.fromPlayerId]?.name || "";
+    els.statusTitle.textContent = "可以杠或碰";
+    els.statusText.textContent = `${gangSource} 打出 ${tileName(state.pendingGang.tile)}，你可以杠、碰或跳过。`;
   } else if (isPendingHumanPeng) {
+    const source = state.players[state.pendingPeng.fromPlayerId]?.name || "";
     els.statusTitle.textContent = "可以碰牌";
-    els.statusText.textContent = `你可以碰 ${tileName(state.pendingPeng.tile)}，或点“过”继续。`;
+    els.statusText.textContent = `${source} 打出 ${tileName(state.pendingPeng.tile)}，你可以碰或点"过"跳过。`;
   } else if (isPendingHumanGang) {
+    const source = state.players[state.pendingGang.fromPlayerId]?.name || "";
     els.statusTitle.textContent = "可以杠牌";
-    els.statusText.textContent = `你可以明杠 ${tileName(state.pendingGang.tile)}，或点“过”继续。`;
+    els.statusText.textContent = `${source} 打出 ${tileName(state.pendingGang.tile)}，你可以杠或点"过"跳过。`;
   } else if (isHumanTurn) {
     const canSelfDraw = canHuPlayer(state.players[0]);
     const canGang = humanGangOptions.length > 0;
@@ -763,30 +791,29 @@ function discardTile(playerId, tileId) {
   addLog(`${player.name} 打出 ${tileName(tile)}。`);
 
   const gangOption = findExposedGangOption(tile, playerId);
+  const pengOption = findPengOption(tile, playerId);
+
+  if (gangOption && gangOption.playerId === 0 || pengOption && pengOption.playerId === 0) {
+    state.pendingGang = gangOption?.playerId === 0 ? gangOption : null;
+    state.pendingPeng = pengOption?.playerId === 0 ? pengOption : null;
+    state.gangChoicesOpen = false;
+    state.phase = "player-turn";
+    render();
+    return;
+  }
+
   if (gangOption) {
-    if (gangOption.playerId === 0) {
-      state.pendingPeng = null;
-      state.pendingGang = gangOption;
-      state.gangChoicesOpen = false;
-      state.phase = "player-turn";
-      render();
-      return;
-    }
     executeGang(gangOption);
     return;
   }
 
-  const pengOption = findPengOption(tile, playerId);
   if (pengOption) {
-    if (pengOption.playerId === 0) {
-      state.pendingPeng = pengOption;
-      state.pendingGang = null;
-      state.gangChoicesOpen = false;
-      state.phase = "player-turn";
-      render();
-      return;
+    if (shouldAiPeng(pengOption)) {
+      executePeng(pengOption);
+    } else {
+      addLog(`${state.players[pengOption.playerId].name} 选择不碰 ${tileName(tile)}。`);
+      advanceTurn();
     }
-    executePeng(pengOption);
     return;
   }
 
@@ -844,6 +871,10 @@ function finishRound(winnerId) {
 function playAiTurn(playerId) {
   if (state.phase !== "ai-turn" || state.currentPlayer !== playerId || state.phase === "ended") return;
   const player = state.players[playerId];
+  if (canHuPlayer(player)) {
+    finishRound(playerId);
+    return;
+  }
   const gangOptions = [...getConcealedGangOptions(playerId), ...getAddedGangOptions(playerId)];
   if (gangOptions.length > 0) {
     executeGang(gangOptions[0]);
@@ -955,6 +986,10 @@ function handlePengButtonClick() {
 }
 
 function handleGangButtonClick() {
+  if (state.pendingGang?.playerId === 0) {
+    executeGang(state.pendingGang);
+    return;
+  }
   const options = getHumanGangOptions();
   if (options.length === 0) return;
   if (options.length === 1) {
@@ -980,14 +1015,14 @@ function claimHumanHu() {
 }
 
 function passPendingWin() {
-  if (state.pendingPeng?.playerId === 0) {
-    addLog(`你跳过 ${tileName(state.pendingPeng.tile)} 碰牌。`);
+  if (state.pendingPeng?.playerId === 0 || state.pendingGang?.playerId === 0) {
+    if (state.pendingPeng?.playerId === 0) {
+      addLog(`你跳过 ${tileName(state.pendingPeng.tile)} 碰牌。`);
+    }
+    if (state.pendingGang?.playerId === 0) {
+      addLog(`你跳过 ${tileName(state.pendingGang.tile)} 明杠。`);
+    }
     state.pendingPeng = null;
-    advanceTurn();
-    return;
-  }
-  if (state.pendingGang?.playerId === 0) {
-    addLog(`你跳过 ${tileName(state.pendingGang.tile)} 明杠。`);
     state.pendingGang = null;
     state.gangChoicesOpen = false;
     advanceTurn();
@@ -1190,7 +1225,8 @@ function runRuleTests() {
     assert(pengOption?.playerId === 0 && pengOption.type === "peng", "two matching concealed tiles should claim the previous discard as peng");
     state.players = createPlayers();
     state.players[0].hand = [t("wan", 3, 0), t("wan", 3, 1), t("wan", 3, 3), t("tong", 1)];
-    assert(findPengOption(t("wan", 3, 2), 3) === null, "three matching concealed tiles should use gang instead of peng");
+    const threeTilePeng = findPengOption(t("wan", 3, 2), 3);
+    assert(threeTilePeng?.playerId === 0 && threeTilePeng.tileIds.length === 2, "three matching tiles should still offer peng option using two tiles for gang/peng coexistence");
     state.players = createPlayers();
     state.players[0].hand = [t("wan", 3, 0), t("wan", 3, 1), t("tong", 1)];
     const discardedPengTile = t("wan", 3, 2);
@@ -1208,6 +1244,31 @@ function runRuleTests() {
     state.players[0].melds = [{ type: "concealed", tiles: [t("wan", 1, 0), t("wan", 1, 1), t("wan", 1, 2), t("wan", 1, 3)] }];
     state.players[0].hand = [t("wan", 2), t("wan", 3), t("wan", 4), t("tong", 2), t("tong", 3), t("tong", 4), t("tiao", 7), t("tiao", 7, 1), t("tiao", 7, 2), t("wan", 9), t("wan", 9, 1)];
     assert(canHuPlayer(state.players[0]), "Hu detection should account for existing gang melds");
+    state.players = createPlayers();
+    state.players[0].hand = [t("wan", 3, 0), t("wan", 3, 1), t("wan", 3, 2), t("tong", 1)];
+    const coexistDiscard = t("wan", 3, 3);
+    state.players[3].discards = [coexistDiscard];
+    const coexistGang = findExposedGangOption(coexistDiscard, 3);
+    const coexistPeng = findPengOption(coexistDiscard, 3);
+    assert(coexistGang?.playerId === 0 && coexistPeng?.playerId === 0, "three matching tiles should allow both gang and peng on the same discard");
+    state.players = createPlayers();
+    state.players[1].hand = [t("wan", 5, 0), t("wan", 5, 1), t("tong", 1)];
+    state.players[2].hand = [t("wan", 5, 2), t("wan", 5, 3), t("tong", 2)];
+    const priorityDiscard = t("wan", 5, 0);
+    state.players[0].discards = [priorityDiscard];
+    const priorityPeng = findPengOption(priorityDiscard, 0);
+    assert(priorityPeng?.playerId === 1, "peng priority should go to the closest player in counter-clockwise order");
+    state.players = createPlayers();
+    state.players[1].hand = [t("wan", 7, 0), t("wan", 7, 1), t("tong", 1), t("tong", 3), t("tong", 5), t("tiao", 1), t("tiao", 3), t("tiao", 5), t("tiao", 7), t("tiao", 9), t("wan", 1)];
+    state.wall = Array.from({ length: 8 }, (_, i) => t("tong", 1, i));
+    const lowWallOption = { type: "peng", playerId: 1, fromPlayerId: 0, tile: t("wan", 7, 2), tileKey: "wan-7", tileIds: ["wan-7-0", "wan-7-1"] };
+    assert(shouldAiPeng(lowWallOption) === false, "AI should not peng when wall is below 10 tiles");
+    state.players = createPlayers();
+    state.players[1].melds = [{ type: "peng", tileKey: "wan-9", fromPlayerId: 2, tiles: [t("wan", 9, 0), t("wan", 9, 1), t("wan", 9, 2)] }];
+    state.players[1].hand = [t("wan", 4, 0), t("wan", 4, 1), t("wan", 1), t("wan", 2), t("wan", 3), t("tong", 2), t("tong", 3), t("tong", 4), t("tiao", 7), t("tiao", 7, 1), t("tiao", 7, 2)];
+    state.wall = Array.from({ length: 50 }, (_, i) => makeTile(SUITS[i % 3], (i % 9) + 1, i));
+    const goodPengOption = { type: "peng", playerId: 1, fromPlayerId: 0, tile: t("wan", 4, 2), tileKey: "wan-4", tileIds: ["wan-4-0", "wan-4-1"] };
+    assert(shouldAiPeng(goodPengOption) === true, "AI should peng when it brings hand closer to winning");
   });
   assert(JSON.stringify(state) === stateBeforeSetupChecks, "runRuleTests should restore game state after setup checks");
   return results;
